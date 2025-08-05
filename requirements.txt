@@ -1,4 +1,4 @@
 streamlit
-openai
 requests
 python-dotenv
+sqlite3-binary
