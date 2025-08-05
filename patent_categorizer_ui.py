@@ -2,13 +2,12 @@ import os
 import json
 import sqlite3
 import requests
-import openai
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load OpenAI key from .env
+# Load Together API key from .env or Streamlit secrets
 load_dotenv()
-openai.api_key = os.getenv("OPENAI_API_KEY")
+TOGETHER_API_KEY = os.getenv("TOGETHER_API_KEY") or st.secrets["TOGETHER_API_KEY"]
 
 # SQLite DB setup
 DB_FILE = "patents_cache.db"
@@ -51,7 +50,28 @@ def query_patent(patent_number):
             return data
     return None
 
-def categorize_with_gpt(patent_data):
+def call_together_llama3(prompt):
+    url = "https://api.together.xyz/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {TOGETHER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "meta-llama/Meta-Llama-3-70B-Instruct-Turbo",
+        "messages": [
+            {"role": "system", "content": "You are a patent analyst."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 1024
+    }
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json()["choices"][0]["message"]["content"]
+    else:
+        raise Exception(f"Together API Error: {response.status_code}, {response.text}")
+
+def categorize_with_llm(patent_data):
     patent = patent_data['patents'][0]
     title = patent.get('patent_title', '')
     abstract = patent.get('abstract', '')
@@ -76,15 +96,8 @@ Return only JSON with:
             return json.loads(row[0])
 
     try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4",
-            messages=[
-                {"role": "system", "content": "You are a patent analyst."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2
-        )
-        result = json.loads(response.choices[0].message.content)
+        response_text = call_together_llama3(prompt)
+        result = json.loads(response_text)
         with sqlite3.connect(DB_FILE) as conn:
             conn.execute("UPDATE patent_cache SET gpt_json=? WHERE patent_number=?",
                          (json.dumps(result), patent.get("patent_number")))
@@ -93,8 +106,8 @@ Return only JSON with:
         return {"error": str(e)}
 
 # Streamlit UI
-st.set_page_config(page_title="Patent Categorizer GPT", layout="centered")
-st.title("🔍 Patent Categorization Tool")
+st.set_page_config(page_title="Patent Categorizer (LLaMA 3 via Together.ai)", layout="centered")
+st.title("🔍 Patent Categorization Tool (Open Source LLM)")
 
 init_cache()
 
@@ -106,7 +119,7 @@ if patent_input:
         if not patent_data:
             st.error("Patent not found or API error.")
         else:
-            gpt_result = categorize_with_gpt(patent_data)
+            gpt_result = categorize_with_llm(patent_data)
             patent = patent_data['patents'][0]
 
             st.subheader("📄 Patent Metadata")
@@ -121,9 +134,10 @@ if patent_input:
             })
 
             if "error" in gpt_result:
-                st.error(f"GPT Error: {gpt_result['error']}")
+                st.error(f"LLM Error: {gpt_result['error']}")
             else:
                 st.subheader("📚 Categorization")
                 st.json(gpt_result)
                 st.markdown("### 🧠 Reasoning")
                 st.write(gpt_result.get("reasoning", "No explanation returned."))
+
